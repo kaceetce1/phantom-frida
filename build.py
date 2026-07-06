@@ -503,6 +503,24 @@ def apply_targeted_patches(frida_dir: Path, custom_name: str, frida_major: int):
         else:
             log(f"  {target_name}: file not found", "WARN")
 
+    # --- Frida 16.x: fix agent ninja target path in Makefile.linux.mk ---
+    # Source patches rename frida-agent in meson.build (so ninja builds gnoah-agent.so),
+    # but the Makefile uses `lib/agent/frida-agent.so` as a ninja target reference.
+    # Pattern `frida-agent-` (with hyphen) does NOT match `frida-agent.so` (with dot),
+    # causing: ninja: error: unknown target 'lib/agent/frida-agent.so'
+    if frida_major <= 16:
+        makefile_linux = frida_dir / "Makefile.linux.mk"
+        if makefile_linux.exists():
+            count = replace_in_file(
+                makefile_linux,
+                f"lib/agent/frida-agent.so",
+                f"lib/agent/{custom_name}-agent.so",
+            )
+            if count:
+                log(f"  Makefile.linux.mk: agent ninja target renamed ({count})", "OK")
+            else:
+                log("  Makefile.linux.mk: agent path pattern not found", "WARN")
+
     log("Targeted patches complete", "OK")
 
 
