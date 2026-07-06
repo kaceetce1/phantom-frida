@@ -96,7 +96,8 @@ jobs:
           cd build/frida
           git checkout -- .
           git submodule foreach --recursive 'git checkout -- . || true'
-          git clean -fdx || true
+          # -e configure: keep the generated wrapper script (not tracked by git)
+          git clean -fdx -e configure || true
           rm -rf build/
 
       - name: Build command

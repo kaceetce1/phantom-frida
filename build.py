@@ -683,6 +683,31 @@ def apply_binary_patches(binary_path: Path, custom_name: str, extended: bool = F
 
 def configure_arch(frida_dir: Path, arch: str, ndk_path: Path):
     log(f"Configuring for {arch}...", "STEP")
+
+    # Frida's ./configure may be absent after git clean -fdx on a cached source tree.
+    # If missing, regenerate it via the releng bootstrap helper.
+    configure_script = frida_dir / "configure"
+    if not configure_script.exists():
+        log("./configure not found — regenerating via releng bootstrap...", "WARN")
+        run(
+            "python3 releng/frida-env-setup/setup.py --build",
+            cwd=str(frida_dir),
+            env={"ANDROID_NDK_ROOT": str(ndk_path)},
+            check=False,
+        )
+        # Frida also exposes a plain 'make configure' target
+        if not configure_script.exists():
+            run("make configure", cwd=str(frida_dir),
+                env={"ANDROID_NDK_ROOT": str(ndk_path)}, check=False)
+
+    if not configure_script.exists():
+        log(
+            "./configure still missing. Ensure the Frida source is complete "
+            "(git clone --recurse-submodules) and the version supports this build path.",
+            "ERROR",
+        )
+        sys.exit(1)
+
     run(
         f"./configure --host={arch}",
         cwd=str(frida_dir),
