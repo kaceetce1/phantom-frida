@@ -742,8 +742,9 @@ def build_frida_v16(frida_dir: Path, arch: str, ndk_path: Path):
         "pip3 install ninja meson --quiet",
         cwd=str(frida_dir), check=False)
 
+    # V=1 prints each compile command so CI logs show the exact failing line
     run(
-        f"make {target} -j{cpus}",
+        f"make {target} V=1 -j{cpus}",
         cwd=str(frida_dir),
         env={"ANDROID_NDK_ROOT": str(ndk_path)},
     )

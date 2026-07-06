@@ -56,7 +56,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential curl git python3 unzip
+          sudo apt-get install -y \
+            build-essential curl git python3 python3-pip unzip \
+            valac libc6-dev libglib2.0-dev \
+            nodejs npm
 
       # Determine NDK version: Frida 16.x needs r25c, 17.x needs r29
       - name: Determine NDK version
