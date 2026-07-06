@@ -58,29 +58,43 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential curl git python3 unzip
 
+      # Determine NDK version: Frida 16.x needs r25c, 17.x needs r29
+      - name: Determine NDK version
+        id: ndk
+        run: |
+          MAJOR=$(echo "${{ inputs.frida_version }}" | cut -d. -f1)
+          if [ "$MAJOR" -le 16 ]; then
+            echo "version=r25c" >> $GITHUB_OUTPUT
+            echo "NDK version: r25c (Frida 16.x)"
+          else
+            echo "version=r29" >> $GITHUB_OUTPUT
+            echo "NDK version: r29 (Frida 17.x+)"
+          fi
+
       # Cache NDK (~1.5 GB) — saves ~3 min on subsequent runs
       - name: Cache NDK
         uses: actions/cache@v4
         id: ndk-cache
         with:
-          path: build/android-ndk-r29
-          key: ndk-r29-linux
+          path: build/android-ndk-${{ steps.ndk.outputs.version }}
+          key: ndk-${{ steps.ndk.outputs.version }}-linux
 
       - name: Download NDK
         if: steps.ndk-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p build
-          curl -L -o build/android-ndk-r29-linux.zip \
-            https://dl.google.com/android/repository/android-ndk-r29-linux.zip
-          cd build && unzip -q android-ndk-r29-linux.zip && rm android-ndk-r29-linux.zip
+          curl -L -o build/android-ndk-${{ steps.ndk.outputs.version }}-linux.zip \
+            https://dl.google.com/android/repository/android-ndk-${{ steps.ndk.outputs.version }}-linux.zip
+          cd build && unzip -q android-ndk-${{ steps.ndk.outputs.version }}-linux.zip && rm android-ndk-${{ steps.ndk.outputs.version }}-linux.zip
 
       # Cache Frida source tree — saves ~5 min clone time
+      # Key includes -v2 to bust any corrupted caches from previous runs
       - name: Cache Frida source
         uses: actions/cache@v4
         id: frida-cache
         with:
           path: build/frida
-          key: frida-${{ inputs.frida_version }}-source
+          key: frida-${{ inputs.frida_version }}-source-v2
 
       - name: Clone Frida
         if: steps.frida-cache.outputs.cache-hit != 'true'
@@ -106,7 +120,7 @@ jobs:
           CMD="python3 build.py --version ${{ inputs.frida_version }}"
           CMD="$CMD --name ${{ inputs.custom_name }}"
           CMD="$CMD --arch ${{ inputs.arch }}"
-          CMD="$CMD --skip-clone --ndk-path build/android-ndk-r29"
+          CMD="$CMD --skip-clone --ndk-path build/android-ndk-${{ steps.ndk.outputs.version }}"
           CMD="$CMD --verify"
 
           if [ -n "${{ inputs.port }}" ]; then

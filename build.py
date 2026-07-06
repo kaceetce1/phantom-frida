@@ -47,9 +47,19 @@ from patches import (
 
 # --- Constants ---
 
-NDK_VERSION = "r29"
-NDK_URL = f"https://dl.google.com/android/repository/android-ndk-{NDK_VERSION}-linux.zip"
+# Frida 16.x uses NDK r25 (hardcoded in releng/setup-env.sh: ndk_required=25)
+# Frida 17.x uses NDK r29
+NDK_BY_MAJOR = {16: "r25c", 17: "r29"}
+NDK_DEFAULT = "r29"
 ALL_ARCHS = ["android-arm64", "android-arm", "android-x86_64", "android-x86"]
+
+
+def ndk_version_for(frida_major: int) -> str:
+    return NDK_BY_MAJOR.get(frida_major, NDK_DEFAULT)
+
+
+def ndk_url_for(ndk_ver: str) -> str:
+    return f"https://dl.google.com/android/repository/android-ndk-{ndk_ver}-linux.zip"
 
 
 def log(msg: str, level: str = "INFO"):
@@ -132,17 +142,19 @@ def replace_in_tree(root: Path, old: str, new: str,
 # NDK
 # ============================================================================
 
-def ensure_ndk(work_dir: Path) -> Path:
+def ensure_ndk(work_dir: Path, frida_major: int) -> Path:
     """Download and extract Android NDK if needed."""
-    ndk_dir = work_dir / f"android-ndk-{NDK_VERSION}"
+    ndk_ver = ndk_version_for(frida_major)
+    ndk_dir = work_dir / f"android-ndk-{ndk_ver}"
     if ndk_dir.exists():
         log(f"NDK already at {ndk_dir}", "OK")
         return ndk_dir
 
-    ndk_zip = work_dir / f"android-ndk-{NDK_VERSION}-linux.zip"
+    ndk_url = ndk_url_for(ndk_ver)
+    ndk_zip = work_dir / f"android-ndk-{ndk_ver}-linux.zip"
     if not ndk_zip.exists():
-        log(f"Downloading NDK {NDK_VERSION} (~1.5 GB)...", "STEP")
-        run(f"curl -L -o {ndk_zip} {NDK_URL}", cwd=str(work_dir))
+        log(f"Downloading NDK {ndk_ver} (~1.5 GB)...", "STEP")
+        run(f"curl -L -o {ndk_zip} {ndk_url}", cwd=str(work_dir))
 
     log("Extracting NDK...", "STEP")
     run(f"unzip -q {ndk_zip}", cwd=str(work_dir))
@@ -678,36 +690,16 @@ def apply_binary_patches(binary_path: Path, custom_name: str, extended: bool = F
 
 
 # ============================================================================
-# Build
+# Build — Frida 17.x path (./configure + make)
 # ============================================================================
 
-def configure_arch(frida_dir: Path, arch: str, ndk_path: Path):
-    log(f"Configuring for {arch}...", "STEP")
-
-    # Frida's ./configure may be absent after git clean -fdx on a cached source tree.
-    # If missing, regenerate it via the releng bootstrap helper.
+def configure_arch_v17(frida_dir: Path, arch: str, ndk_path: Path):
+    log(f"[17.x] Configuring for {arch}...", "STEP")
     configure_script = frida_dir / "configure"
     if not configure_script.exists():
-        log("./configure not found — regenerating via releng bootstrap...", "WARN")
-        run(
-            "python3 releng/frida-env-setup/setup.py --build",
-            cwd=str(frida_dir),
-            env={"ANDROID_NDK_ROOT": str(ndk_path)},
-            check=False,
-        )
-        # Frida also exposes a plain 'make configure' target
-        if not configure_script.exists():
-            run("make configure", cwd=str(frida_dir),
-                env={"ANDROID_NDK_ROOT": str(ndk_path)}, check=False)
-
-    if not configure_script.exists():
-        log(
-            "./configure still missing. Ensure the Frida source is complete "
-            "(git clone --recurse-submodules) and the version supports this build path.",
-            "ERROR",
-        )
+        log("./configure not found in this Frida version", "ERROR")
+        log("Frida 17.x requires ./configure at repo root. Check your version.", "ERROR")
         sys.exit(1)
-
     run(
         f"./configure --host={arch}",
         cwd=str(frida_dir),
@@ -715,11 +707,43 @@ def configure_arch(frida_dir: Path, arch: str, ndk_path: Path):
     )
 
 
-def build_frida(frida_dir: Path, ndk_path: Path):
+def build_frida_v17(frida_dir: Path, ndk_path: Path):
     cpus = os.cpu_count() or 4
-    log(f"Building ({cpus} threads)...", "STEP")
+    log(f"[17.x] Building ({cpus} threads)...", "STEP")
     run(
         f"make -j{cpus}",
+        cwd=str(frida_dir),
+        env={"ANDROID_NDK_ROOT": str(ndk_path)},
+    )
+
+
+# ============================================================================
+# Build — Frida 16.x path (make core-android-{arch})
+# ============================================================================
+
+# Mapping from our arch names → Frida 16.x make target suffix
+_ARCH_TO_MAKE_SUFFIX = {
+    "android-arm64":  "android-arm64",
+    "android-arm":    "android-arm",
+    "android-x86_64": "android-x86_64",
+    "android-x86":    "android-x86",
+}
+
+
+def build_frida_v16(frida_dir: Path, arch: str, ndk_path: Path):
+    """Frida 16.x: single make invocation builds + installs into build/frida-{arch}/."""
+    cpus = os.cpu_count() or 4
+    suffix = _ARCH_TO_MAKE_SUFFIX[arch]
+    target = f"core-{suffix}"
+    log(f"[16.x] Building target '{target}' ({cpus} threads)...", "STEP")
+
+    # Install ninja/meson if missing (16.x releng needs them)
+    run("pip3 install ninja meson --quiet --break-system-packages 2>/dev/null || "
+        "pip3 install ninja meson --quiet",
+        cwd=str(frida_dir), check=False)
+
+    run(
+        f"make {target} -j{cpus}",
         cwd=str(frida_dir),
         env={"ANDROID_NDK_ROOT": str(ndk_path)},
     )
@@ -730,19 +754,20 @@ def build_frida(frida_dir: Path, ndk_path: Path):
 # ============================================================================
 
 def collect_artifacts(frida_dir: Path, arch: str, custom_name: str,
-                      version: str, output_dir: Path, extended: bool):
+                      version: str, output_dir: Path, extended: bool,
+                      frida_major: int):
     """Find, binary-patch, and package build artifacts."""
     log(f"Collecting artifacts for {arch}...", "STEP")
 
     arch_short = arch.replace("android-", "")
 
-    def find_artifact(subdir: str, patterns: list[str]) -> Path | None:
+    def find_artifact_v17(subdir: str, patterns: list[str]) -> Path | None:
+        """17.x layout: build/subprojects/frida-core/{subdir}/{name}"""
         base = frida_dir / "build" / "subprojects" / "frida-core" / subdir
         for pattern in patterns:
             candidate = base / pattern
             if candidate.exists():
                 return candidate
-        # List directory for debugging
         if base.exists():
             log(f"    Looking in {base}:", "INFO")
             for f in sorted(base.iterdir()):
@@ -750,56 +775,114 @@ def collect_artifacts(frida_dir: Path, arch: str, custom_name: str,
                     log(f"      {f.name} ({f.stat().st_size:,} bytes)", "INFO")
         return None
 
+    def find_artifact_v16(rel_paths: list[str]) -> Path | None:
+        """16.x layout: build/frida-{arch}/bin/ or build/tmp-{arch}/frida-core/"""
+        candidates = [
+            frida_dir / "build" / f"frida-{arch}" / p
+            for p in rel_paths
+        ] + [
+            frida_dir / "build" / f"tmp-{arch}" / "frida-core" / p
+            for p in rel_paths
+        ]
+        for c in candidates:
+            if c.exists():
+                return c
+        # Debug: list what's actually there
+        for search_root in [
+            frida_dir / "build" / f"frida-{arch}",
+            frida_dir / "build" / f"tmp-{arch}" / "frida-core",
+        ]:
+            if search_root.exists():
+                log(f"    Contents of {search_root}:", "INFO")
+                for f in sorted(search_root.rglob("*")):
+                    if f.is_file() and f.stat().st_size > 100_000:
+                        log(f"      {f.relative_to(search_root)} ({f.stat().st_size:,} bytes)", "INFO")
+        return None
+
     def save_artifact(src: Path, out_name: str):
-        # Save compressed
         out_gz = output_dir / f"{out_name}.gz"
         with open(src, "rb") as f_in:
             with gzip.open(out_gz, "wb") as f_out:
                 shutil.copyfileobj(f_in, f_out)
         log(f"    -> {out_gz.name} ({out_gz.stat().st_size / 1024 / 1024:.1f} MB)", "OK")
-
-        # Save uncompressed
         out_bin = output_dir / out_name
         shutil.copy2(src, out_bin)
         os.chmod(out_bin, 0o755)
 
-    # --- Server ---
-    server = find_artifact("server", [
-        f"{custom_name}-server",
-        f"{custom_name}-server-raw",
-        "frida-server",
-        "frida-server-raw",
-    ])
-    if server:
-        log(f"  Server: {server.name}", "OK")
-        apply_binary_patches(server, custom_name, extended)
-        save_artifact(server, f"{custom_name}-server-{version}-android-{arch_short}")
+    if frida_major >= 17:
+        # --- 17.x artifact locations ---
+        server = find_artifact_v17("server", [
+            f"{custom_name}-server",
+            f"{custom_name}-server-raw",
+            "frida-server",
+            "frida-server-raw",
+        ])
+        if server:
+            log(f"  Server: {server.name}", "OK")
+            apply_binary_patches(server, custom_name, extended)
+            save_artifact(server, f"{custom_name}-server-{version}-android-{arch_short}")
+        else:
+            log("  Server: NOT FOUND", "ERROR")
+
+        agent = find_artifact_v17("lib/agent", [
+            f"lib{custom_name}-agent.so",
+            f"lib{custom_name}-agent-modulated.so",
+            f"lib{custom_name}-agent-raw.so",
+            "libfrida-agent.so",
+            "libfrida-agent-modulated.so",
+        ])
+        if agent:
+            log(f"  Agent: {agent.name}", "OK")
+            apply_binary_patches(agent, custom_name, extended)
+
+        gadget = find_artifact_v17("lib/gadget", [
+            f"lib{custom_name}-gadget.so",
+            f"lib{custom_name}-gadget-modulated.so",
+            "libfrida-gadget.so",
+            "libfrida-gadget-modulated.so",
+        ])
+        if gadget:
+            log(f"  Gadget: {gadget.name}", "OK")
+            apply_binary_patches(gadget, custom_name, extended)
+            save_artifact(gadget, f"{custom_name}-gadget-{version}-android-{arch_short}.so")
+
     else:
-        log("  Server: NOT FOUND", "ERROR")
+        # --- 16.x artifact locations ---
+        # Server: build/frida-{arch}/bin/frida-server (installed) or tmp dir
+        server = find_artifact_v16([
+            f"bin/{custom_name}-server",
+            f"bin/frida-server",
+            f"src/{custom_name}-server",
+            f"src/frida-server",
+        ])
+        if server:
+            log(f"  Server: {server.name}", "OK")
+            apply_binary_patches(server, custom_name, extended)
+            save_artifact(server, f"{custom_name}-server-{version}-android-{arch_short}")
+        else:
+            log("  Server: NOT FOUND", "ERROR")
 
-    # --- Agent .so ---
-    agent = find_artifact("lib/agent", [
-        f"lib{custom_name}-agent.so",
-        f"lib{custom_name}-agent-modulated.so",
-        f"lib{custom_name}-agent-raw.so",
-        "libfrida-agent.so",
-        "libfrida-agent-modulated.so",
-    ])
-    if agent:
-        log(f"  Agent: {agent.name}", "OK")
-        apply_binary_patches(agent, custom_name, extended)
+        # Agent: build/frida-{arch}/lib/frida/{arch}/frida-agent.so
+        agent = find_artifact_v16([
+            f"lib/frida/{arch_short}/{custom_name}-agent.so",
+            f"lib/frida/{arch_short}/frida-agent.so",
+            f"lib/{custom_name}-agent.so",
+            "lib/frida-agent.so",
+        ])
+        if agent:
+            log(f"  Agent: {agent.name}", "OK")
+            apply_binary_patches(agent, custom_name, extended)
 
-    # --- Gadget .so ---
-    gadget = find_artifact("lib/gadget", [
-        f"lib{custom_name}-gadget.so",
-        f"lib{custom_name}-gadget-modulated.so",
-        "libfrida-gadget.so",
-        "libfrida-gadget-modulated.so",
-    ])
-    if gadget:
-        log(f"  Gadget: {gadget.name}", "OK")
-        apply_binary_patches(gadget, custom_name, extended)
-        save_artifact(gadget, f"{custom_name}-gadget-{version}-android-{arch_short}.so")
+        gadget = find_artifact_v16([
+            f"lib/frida/{arch_short}/{custom_name}-gadget.so",
+            f"lib/frida/{arch_short}/frida-gadget.so",
+            f"lib/{custom_name}-gadget.so",
+            "lib/frida-gadget.so",
+        ])
+        if gadget:
+            log(f"  Gadget: {gadget.name}", "OK")
+            apply_binary_patches(gadget, custom_name, extended)
+            save_artifact(gadget, f"{custom_name}-gadget-{version}-android-{arch_short}.so")
 
 
 # ============================================================================
@@ -875,7 +958,7 @@ Detection vectors covered:
     parser.add_argument("--output-dir", "-o", default=None,
                         help="Output directory (default: ./output)")
     parser.add_argument("--ndk-path", default=None,
-                        help="Path to existing Android NDK r29 (skip download)")
+                        help="Path to existing Android NDK (r25c for Frida 16.x, r29 for 17.x)")
     parser.add_argument("--skip-clone", action="store_true",
                         help="Use existing source in work-dir")
     parser.add_argument("--skip-build", action="store_true",
@@ -926,8 +1009,9 @@ Detection vectors covered:
             log(f"NDK path does not exist: {ndk_path}", "ERROR")
             sys.exit(1)
     else:
-        ndk_path = ensure_ndk(work_dir)
+        ndk_path = ensure_ndk(work_dir, frida_major)
     log(f"  NDK:      {ndk_path}", "INFO")
+    log(f"  NDK ver:  {ndk_version_for(frida_major)} (required by Frida {frida_major}.x)", "INFO")
 
     # Step 2: Clone
     frida_dir = work_dir / "frida"
@@ -963,8 +1047,11 @@ Detection vectors covered:
         log(f"Source ready at: {frida_dir}", "INFO")
         log("To build manually:", "INFO")
         log(f"  cd {frida_dir}", "INFO")
-        log(f"  ANDROID_NDK_ROOT={ndk_path} ./configure --host=android-arm64", "INFO")
-        log(f"  ANDROID_NDK_ROOT={ndk_path} make -j$(nproc)", "INFO")
+        if frida_major >= 17:
+            log(f"  ANDROID_NDK_ROOT={ndk_path} ./configure --host=android-arm64", "INFO")
+            log(f"  ANDROID_NDK_ROOT={ndk_path} make -j$(nproc)", "INFO")
+        else:
+            log(f"  ANDROID_NDK_ROOT={ndk_path} make core-android-arm64 -j$(nproc)", "INFO")
         return
 
     # Step 5: Build loop
@@ -973,22 +1060,23 @@ Detection vectors covered:
         log(f"Building for {arch}", "STEP")
         log("=" * 60, "HEADER")
 
-        # Configure
-        configure_arch(frida_dir, arch, ndk_path)
+        if frida_major >= 17:
+            # 17.x: configure → build → patch agent_main → build again
+            configure_arch_v17(frida_dir, arch, ndk_path)
+            log("First build...", "STEP")
+            build_frida_v17(frida_dir, ndk_path)
+            apply_post_build_patches(frida_dir, custom_name)
+            log("Second build (incremental)...", "STEP")
+            build_frida_v17(frida_dir, ndk_path)
+        else:
+            # 16.x: single make target, no configure step
+            build_frida_v16(frida_dir, arch, ndk_path)
+            # Post-build symbol patch still applies for 16.x
+            apply_post_build_patches(frida_dir, custom_name)
+            log("Second build (incremental)...", "STEP")
+            build_frida_v16(frida_dir, arch, ndk_path)
 
-        # First build
-        log("First build...", "STEP")
-        build_frida(frida_dir, ndk_path)
-
-        # Post-build patches (frida_agent_main appears only after first build)
-        apply_post_build_patches(frida_dir, custom_name)
-
-        # Second build (incremental — only recompiles files with patched symbol)
-        log("Second build (incremental)...", "STEP")
-        build_frida(frida_dir, ndk_path)
-
-        # Collect and binary-patch artifacts
-        collect_artifacts(frida_dir, arch, custom_name, version, output_dir, args.extended)
+        collect_artifacts(frida_dir, arch, custom_name, version, output_dir, args.extended, frida_major)
 
     # Step 6: Verification
     if args.verify:

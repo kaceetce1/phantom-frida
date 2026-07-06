@@ -63,6 +63,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential curl git python3 unzip
 
+      # scheduled-build always targets latest stable (17.x+), NDK r29 is correct
       - name: Cache NDK
         uses: actions/cache@v4
         id: ndk-cache
@@ -83,7 +84,7 @@ jobs:
         id: frida-cache
         with:
           path: build/frida
-          key: frida-${{ steps.version.outputs.version }}-source
+          key: frida-${{ steps.version.outputs.version }}-source-v2
 
       - name: Clone Frida
         if: steps.frida-cache.outputs.cache-hit != 'true'
