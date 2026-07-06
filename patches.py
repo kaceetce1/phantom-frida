@@ -58,6 +58,8 @@ def get_source_patches(name: str, cap_name: str) -> list[tuple[str, str]]:
         # --- Agent references (various quoting styles in Vala/C/Meson) ---
         # More specific first to avoid partial matches
         ('"agent" / "frida-agent.', f'"agent" / "{name}-agent.'),
+        # agent-glue.c: #include "frida-agent.h" (valac-generated header, name tracks library)
+        ('"frida-agent.h"', f'"{name}-agent.h"'),
         ("'frida-agent'", f"'{name}-agent'"),
         ('"frida-agent"', f'"{name}-agent"'),
         ("frida-agent-", f"{name}-agent-"),
